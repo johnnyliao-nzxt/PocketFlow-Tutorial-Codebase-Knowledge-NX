@@ -89,14 +89,63 @@ class IdentifyAbstractions(Node):
         use_cache = shared.get("use_cache", True)  # Get use_cache flag, default to True
         max_abstraction_num = shared.get("max_abstraction_num", 10)  # Get max_abstraction_num, default to 10
 
-        # Helper to create context from files, respecting limits (basic example)
+        # Helper to create context from files, respecting limits
         def create_llm_context(files_data):
+            from utils.call_llm import estimate_tokens
+            
             context = ""
             file_info = []  # Store tuples of (index, path)
-            for i, (path, content) in enumerate(files_data):
+            max_tokens_per_file = 2000  # Limit each file to ~2000 tokens
+            max_total_tokens = 100000   # Total context limit
+            current_tokens = 0
+            
+            # Sort files by importance (smaller files and important extensions first)
+            def get_file_priority(item):
+                i, (path, content) = item
+                file_size = len(content)
+                priority = 1000000 - file_size  # Smaller files first
+                
+                # Boost priority for important file types
+                important_extensions = ['.py', '.js', '.ts', '.java', '.cpp', '.h', '.md', '.yml', '.yaml', '.json', '.rs', '.c', '.cpp']
+                if any(path.lower().endswith(ext) for ext in important_extensions):
+                    priority += 500000
+                
+                # Boost priority for config/main files
+                important_names = ['main', 'index', 'config', 'setup', '__init__', 'app']
+                if any(name in path.lower() for name in important_names):
+                    priority += 300000
+                    
+                return priority
+            
+            # Sort by priority
+            sorted_files = sorted(enumerate(files_data), key=get_file_priority, reverse=True)
+            
+            for i, (path, content) in sorted_files:
+                # Estimate tokens for this file's content
+                content_tokens = estimate_tokens(content)
+                
+                # If content is too large, truncate it
+                if content_tokens > max_tokens_per_file:
+                    # Truncate to fit within per-file limit
+                    target_chars = int(len(content) * (max_tokens_per_file / content_tokens))
+                    truncated_content = content[:target_chars] + "\n[... File content truncated ...]"
+                    content = truncated_content
+                    content_tokens = estimate_tokens(content)
+                
+                # Check if adding this file would exceed total limit
                 entry = f"--- File Index {i}: {path} ---\n{content}\n\n"
+                entry_tokens = estimate_tokens(entry)
+                
+                if current_tokens + entry_tokens > max_total_tokens:
+                    # Skip remaining files if we would exceed limit
+                    skipped_count = len(files_data) - len(file_info)
+                    if skipped_count > 0:
+                        context += f"\n[... {skipped_count} additional files skipped due to size limits ...]\n"
+                    break
+                
                 context += entry
                 file_info.append((i, path))
+                current_tokens += entry_tokens
 
             return context, file_info  # file_info is list of (index, path)
 
